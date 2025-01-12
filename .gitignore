@@ -1,0 +1,12 @@
+.envrc
+
+node_modules/
+
+nginx/khulnasoft.crt
+nginx/khulnasoft.key
+
+.vagrant
+*.log
+/.env
+
+/right.dhall

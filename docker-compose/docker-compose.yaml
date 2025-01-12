@@ -1,0 +1,786 @@
+version: '2.4'
+services:
+  # Description: This container will migrate the Postgres `frontend`,
+  # `codeintel`, and `codeinsights` databases
+  #
+  # Disk: None
+  # Ports: None
+  #
+  # This container should start after the database instance starts, perform the migrations
+  # and then exit cleanly. After exiting the `frontend` service is allowed to start.
+  #
+  # If you're using a DB instance hosted outside of docker-compose, the environment variables
+  # for this container will need to be updated to reflect the new connection information.
+  migrator:
+    container_name: migrator
+    image: 'index.docker.io/khulnasoft/migrator:5.11.3601@sha256:e35c4794890e83d4028c8c24baa87e5a857f3bf10c814277d0ee04807f895a25'
+    cpus: 0.5
+    mem_limit: '500m'
+    command: ['up']
+    environment:
+      - PGHOST=pgsql
+      - PGPORT=5432
+      - PGUSER=sg
+      - PGPASSWORD=sg
+      - PGDATABASE=sg
+      - PGSSLMODE=disable
+
+      - CODEINTEL_PGHOST=codeintel-db
+      - CODEINTEL_PGPORT=5432
+      - CODEINTEL_PGUSER=sg
+      - CODEINTEL_PGPASSWORD=sg
+      - CODEINTEL_PGDATABASE=sg
+      - CODEINTEL_PGSSLMODE=disable
+
+      # If you are not running code insights, please see:
+      # https://docs.khulnasoft.com/admin/install/docker-compose/operations#database-migrations for more information
+      # for information on how to configure Khulnasoft migrations
+      - CODEINSIGHTS_PGHOST=codeinsights-db
+      - CODEINSIGHTS_PGPORT=5432
+      - CODEINSIGHTS_PGUSER=postgres
+      - CODEINSIGHTS_PGPASSWORD=password
+      - CODEINSIGHTS_PGDATABASE=postgres
+      - CODEINSIGHTS_PGSSLMODE=disable
+    restart: 'on-failure'
+    networks:
+      - khulnasoft
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      codeinsights-db:
+        condition: service_healthy
+      codeintel-db:
+        condition: service_healthy
+
+  # Description: Acts as a reverse proxy for all of the khulnasoft-frontend instances
+  #
+  # Disk: 1GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: none
+  # Ports exposed to the public internet: 80 (HTTP) and 443 (HTTPS)
+  #
+  # Khulnasoft ships with a few builtin templates that cover common HTTP/HTTPS configurations:
+  # - HTTP only (default)
+  # - HTTPS with Let's Encrypt
+  # - HTTPS with custom certificates
+  #
+  # Follow the directions in the comments below to swap between these configurations.
+  #
+  # If none of these built-in configurations suit your needs, then you can create your own Caddyfile, see:
+  # https://caddyserver.com/docs/caddyfile
+  caddy:
+    container_name: caddy
+    image: 'index.docker.io/khulnasoft/caddy:5.11.3601@sha256:dd7bd0c2e4af5a7491b0313d0bf2a0c5b29756b3bfd517a8df7b7324d85f2149'
+    cpus: 4
+    mem_limit: '4g'
+    environment:
+      - 'XDG_DATA_HOME=/caddy-storage/data'
+      - 'XDG_CONFIG_HOME=/caddy-storage/config'
+      - 'SRC_FRONTEND_ADDRESSES=khulnasoft-frontend-0:3080'
+      # Uncomment & update this line when using Let's Encrypt or custom HTTPS certificates:
+      # - 'SRC_SITE_ADDRESS=khulnasoft.example.com'
+      #
+      # Uncomment & update the following line when using HTTPS with Let's Encrypt
+      # - 'SRC_ACME_EMAIL=admin@example.com'
+    volumes:
+      - 'caddy:/caddy-storage'
+      #
+      # IMPORTANT: if a customer uses a reverse proxy in front of Caddy
+      # the configuration files below must be updated to include trusted_proxies
+      #
+      # Comment out the following line when using HTTPS with either Let's Encrypt or custom certificates
+      - '../caddy/builtins/http.Caddyfile:/etc/caddy/Caddyfile'
+      #
+      # Uncomment the following line when using HTTPS with Let's Encrypt's staging environment
+      # - '../caddy/builtins/https.lets-encrypt-staging.Caddyfile:/etc/caddy/Caddyfile'
+      #
+      # Uncomment the following line when using HTTPS with Let's Encrypt's production environment
+      # IMPORTANT: Strongly recommended to test with the staging configuration above first, see that file for details.
+      # - '../caddy/builtins/https.lets-encrypt-prod.Caddyfile:/etc/caddy/Caddyfile'
+      #
+      # Uncomment the following line when using HTTPS with custom certificates
+      # - '../caddy/builtins/https.custom-cert.Caddyfile:/etc/caddy/Caddyfile'
+      #
+      # Uncomment / update the following line when using HTTPS with custom certificates
+      # - '/LOCAL/CERT/PATH.pem:/khulnasoft.pem'
+      #
+      # Uncomment / update the following line when using HTTPS with custom certificates
+      # - '/LOCAL/KEY/PATH.key:/khulnasoft.key'
+    ports:
+      - '0.0.0.0:80:80'
+      - '0.0.0.0:443:443'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Serves the frontend of Khulnasoft via HTTP(S).
+  #
+  # Disk: 128GB / non-persistent SSD
+  # Ports exposed to other Khulnasoft services: 6060/TCP, 3080 (HTTP), and/or 3443 (HTTPS)
+  # Ports exposed to the public internet: none
+  #
+  # Note: SRC_GIT_SERVERS, SEARCHER_URL, and SYMBOLS_URL are space-separated
+  # lists which each allow you to specify more container instances for scaling
+  # purposes. Be sure to also apply such a change here to the frontend-internal
+  # service.
+  khulnasoft-frontend-0:
+    container_name: khulnasoft-frontend-0
+    image: 'index.docker.io/khulnasoft/frontend:5.11.3601@sha256:0f36c801a291b04c28e169e5e5f5b1fc9d1ee18ef0c1a804a65c6ec810faedad'
+    cpus: 4
+    mem_limit: '8g'
+    environment:
+      - DEPLOY_TYPE=docker-compose
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+      - PGHOST=pgsql
+      - CODEINTEL_PGHOST=codeintel-db
+      - CODEINSIGHTS_PGDATASOURCE=postgres://postgres:password@codeinsights-db:5432/postgres
+      - 'SRC_GIT_SERVERS=gitserver-0:3178'
+      - 'SRC_SYNTECT_SERVER=http://syntect-server:9238'
+      - 'SEARCHER_URL=http://searcher-0:3181'
+      - 'SYMBOLS_URL=http://symbols-0:3184'
+      - 'INDEXED_SEARCH_SERVERS=zoekt-webserver-0:6070'
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'REPO_UPDATER_URL=http://repo-updater:3182'
+      - 'GRAFANA_SERVER_URL=http://grafana:3370'
+      - 'PROMETHEUS_URL=http://prometheus:9090'
+      - 'PRECISE_CODE_INTEL_UPLOAD_BACKEND=blobstore'
+      - 'PRECISE_CODE_INTEL_UPLOAD_AWS_ENDPOINT=http://blobstore:9000'
+      - |
+        SRC_PROF_SERVICES=
+          [
+            { "Name": "frontend-0", "Host": "khulnasoft-frontend-0:6060" },
+            { "Name": "frontend-internal-0", "Host": "khulnasoft-frontend-internal:6060" },
+            { "Name": "gitserver-0", "Host": "gitserver-0:6060" },
+            { "Name": "searcher-0", "Host": "searcher-0:6060" },
+            { "Name": "symbols-0", "Host": "symbols-0:6060" },
+            { "Name": "repo-updater", "Host": "repo-updater:6060" },
+            { "Name": "worker", "Host": "worker:6060" },
+            { "Name": "zoekt-indexserver-0", "Host": "zoekt-indexserver-0:6072" },
+            { "Name": "zoekt-webserver-0", "Host": "zoekt-webserver-0:6070", "DefaultPath": "/debug/requests/" }
+          ]
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:3080/healthz' -O /dev/null || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    volumes:
+      - 'khulnasoft-frontend-0:/mnt/cache'
+    networks:
+      - khulnasoft
+    restart: always
+    depends_on:
+      khulnasoft-frontend-internal:
+        condition: service_healthy
+
+  # Description: Serves the internal Khulnasoft frontend API.
+  #
+  # Disk: 128GB / non-persistent SSD
+  # Ports exposed to other Khulnasoft services: 3090/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  khulnasoft-frontend-internal:
+    container_name: khulnasoft-frontend-internal
+    image: 'index.docker.io/khulnasoft/frontend:5.11.3601@sha256:0f36c801a291b04c28e169e5e5f5b1fc9d1ee18ef0c1a804a65c6ec810faedad'
+    cpus: 4
+    mem_limit: '8g'
+    environment:
+      - DEPLOY_TYPE=docker-compose
+      - PGHOST=pgsql
+      - CODEINTEL_PGHOST=codeintel-db
+      - CODEINSIGHTS_PGDATASOURCE=postgres://postgres:password@codeinsights-db:5432/postgres
+      - 'SRC_GIT_SERVERS=gitserver-0:3178'
+      - 'SRC_SYNTECT_SERVER=http://syntect-server:9238'
+      - 'SEARCHER_URL=http://searcher-0:3181'
+      - 'SYMBOLS_URL=http://symbols-0:3184'
+      - 'INDEXED_SEARCH_SERVERS=zoekt-webserver-0:6070'
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'REPO_UPDATER_URL=http://repo-updater:3182'
+      - 'GRAFANA_SERVER_URL=http://grafana:3000'
+      - 'PROMETHEUS_URL=http://prometheus:9090'
+      - 'PRECISE_CODE_INTEL_UPLOAD_BACKEND=blobstore'
+      - 'PRECISE_CODE_INTEL_UPLOAD_AWS_ENDPOINT=http://blobstore:9000'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    volumes:
+      - 'khulnasoft-frontend-internal-0:/mnt/cache'
+    networks:
+      - khulnasoft
+    restart: always
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:3080/healthz' -O /dev/null || exit 1"
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      codeintel-db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+
+  # Description: Stores clones of repositories to perform Git operations.
+  #
+  # Disk: 200GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: 3178/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  gitserver-0:
+    container_name: gitserver-0
+    image: 'index.docker.io/khulnasoft/gitserver:5.11.3601@sha256:09819869f64c1c2b68f632dbe3b50d00bd59e0994f721a81df9dc8cda18bb1a4'
+    cpus: 4
+    mem_limit: '8g'
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    volumes:
+      - 'gitserver-0:/data/repos'
+    networks:
+      - khulnasoft
+    restart: always
+    hostname: gitserver-0
+
+  # Description: Backend for indexed text search operations.
+  #
+  # Disk: 200GB / persistent SSD
+  # Network: 100mbps
+  # Liveness probe: n/a
+  # Ports exposed to other Khulnasoft services: 6072/TCP
+  # Ports exposed to the public internet: none
+  #
+  zoekt-indexserver-0:
+    container_name: zoekt-indexserver-0
+    image: 'index.docker.io/khulnasoft/search-indexer:5.11.3601@sha256:f939d694396223bc3d1a7bcc27db589a132b797fba8f8df13b08dccf55f36079'
+    cpus: 8
+    mem_limit: '16g'
+    environment:
+      - 'HOSTNAME=zoekt-webserver-0:6070'
+      - 'SRC_FRONTEND_INTERNAL=http://khulnasoft-frontend-internal:3090'
+      - 'OPENTELEMETRY_DISABLED=false'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    volumes:
+      - 'zoekt-0-shared:/data/index'
+    networks:
+      - khulnasoft
+    restart: always
+    hostname: zoekt-indexserver-0
+
+  # Description: Backend for indexed text search operations.
+  #
+  # Disk: 200GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: 6070/TCP
+  # Ports exposed to the public internet: none
+  #
+  zoekt-webserver-0:
+    container_name: zoekt-webserver-0
+    image: 'index.docker.io/khulnasoft/indexed-searcher:5.11.3601@sha256:d5ef78da4d65a9bb98868ff3c7713beb6681356920babd6d042af988bbf17df4'
+    cpus: 8
+    mem_limit: '50g'
+    environment:
+      - 'HOSTNAME=zoekt-webserver-0:6070'
+      - 'OPENTELEMETRY_DISABLED=false'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:6070/healthz' -O /dev/null || exit 1"
+      interval: 5s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - 'zoekt-0-shared:/data/index'
+    networks:
+      - khulnasoft
+    restart: always
+    hostname: zoekt-webserver-0
+
+  # Description: Backend for text search operations.
+  #
+  # Disk: 128GB / non-persistent SSD
+  # Ports exposed to other Khulnasoft services: 3181/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  searcher-0:
+    container_name: searcher-0
+    image: 'index.docker.io/khulnasoft/searcher:5.11.3601@sha256:d82769450769a2a7a50f80d53b59e79ef87f50f915b7e9b42da70604d313c85a'
+    cpus: 2
+    mem_limit: '2g'
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:3181/healthz' -O /dev/null || exit 1"
+      interval: 5s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - 'searcher-0:/mnt/cache'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Handles conversion of uploaded precise code intelligence bundles.
+  #
+  # Ports exposed to other Khulnasoft services: 3188/TCP
+  # Ports exposed to the public internet: none
+  #
+  precise-code-intel-worker:
+    container_name: precise-code-intel-worker
+    image: 'index.docker.io/khulnasoft/precise-code-intel-worker:5.11.3601@sha256:7907a4a12c95d7a157731dd7084f7dfed90bc98f401c71c094fa14642e402a0d'
+    cpus: 2
+    mem_limit: '4g'
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'PRECISE_CODE_INTEL_UPLOAD_BACKEND=blobstore'
+      - 'PRECISE_CODE_INTEL_UPLOAD_AWS_ENDPOINT=http://blobstore:9000'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:3188/healthz' -O /dev/null || exit 1"
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Handles repository metadata (not Git data) lookups and updates from external code hosts and other similar services.
+  #
+  # Disk: 128GB / non-persistent SSD
+  # Ports exposed to other Khulnasoft services: 3182/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  repo-updater:
+    container_name: repo-updater
+    image: 'index.docker.io/khulnasoft/repo-updater:5.11.3601@sha256:e6f18c9bf03d59344892ac919220bdbad372890e59bb9a1f6664eb7e5d2d0899'
+    cpus: 4
+    mem_limit: '4g'
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    volumes:
+      - 'repo-updater:/mnt/cache'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Manages background processes.
+  #
+  # Disk: 128GB / non-persistent SSD
+  # Ports exposed to other Khulnasoft services: 3189/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  worker:
+    container_name: worker
+    image: 'index.docker.io/khulnasoft/worker:5.11.3601@sha256:8e21dd7dda6acb3ea836a091c3364f730dd58d3dc35b373b4b458ac4aedaa338'
+    cpus: 4
+    mem_limit: '4g'
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+      - 'SRC_GIT_SERVERS=gitserver-0:3178'
+      - 'SEARCHER_URL=http://searcher-0:3181'
+      - 'SYMBOLS_URL=http://symbols-0:3184'
+      - 'INDEXED_SEARCH_SERVERS=zoekt-webserver-0:6070'
+      - 'PRECISE_CODE_INTEL_UPLOAD_BACKEND=blobstore'
+      - 'PRECISE_CODE_INTEL_UPLOAD_AWS_ENDPOINT=http://blobstore:9000'
+    volumes:
+      - 'worker:/mnt/cache'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Backend for syntax highlighting operations.
+  #
+  # Disk: none
+  # Ports exposed to other Khulnasoft services: 9238/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  syntect-server:
+    container_name: syntect-server
+    image: 'index.docker.io/khulnasoft/syntax-highlighter:5.11.3601@sha256:4fc1ee61ea6d3124b9a6e84acee949d95de65b7fe29befaedf4dc577267e239c'
+    cpus: 4
+    mem_limit: '6g'
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:9238/health' -O /dev/null || exit 1"
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Backend for symbols operations.
+  #
+  # Disk: 128GB / non-persistent SSD
+  # Ports exposed to other Khulnasoft services: 3184/TCP 6060/TCP
+  # Ports exposed to the public internet: none
+  #
+  symbols-0:
+    container_name: symbols-0
+    image: 'index.docker.io/khulnasoft/symbols:5.11.3601@sha256:1e50ffd79a6704fdb8862142310aa0c31bc6114636845ff5bb747a12336af2d3'
+    cpus: 2
+    mem_limit: '4g'
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+      - 'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317'
+    healthcheck:
+      test: "wget -q 'http://127.0.0.1:3184/healthz' -O /dev/null || exit 1"
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    volumes:
+      - 'symbols-0:/mnt/cache'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Prometheus collects metrics and aggregates them into graphs.
+  #
+  # Disk: 200GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: none
+  # Ports exposed to the public internet: none (HTTP 9090 should be exposed to admins only)
+  #
+  prometheus:
+    container_name: prometheus
+    image: 'index.docker.io/khulnasoft/prometheus:5.11.3601@sha256:db829a66d15fd54f3cf90059518eca77f43b4edcb8caa583658d8954711b19b2'
+    cpus: 4
+    mem_limit: '8g'
+    volumes:
+      - 'prometheus-v2:/prometheus'
+      - '../prometheus:/sg_prometheus_add_ons'
+    ports:
+      - '0.0.0.0:9090:9090'
+    networks:
+      - khulnasoft
+    restart: always
+    environment:
+      - 'SRC_FRONTEND_INTERNAL=khulnasoft-frontend-internal:3090'
+
+  # Description: Dashboards and graphs for Prometheus metrics.
+  #
+  # Disk: 2GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: none
+  # Ports exposed to the public internet: none (HTTP 3370 should be exposed to admins only)
+  #
+  # Add the following environment variables if you wish to use an auth proxy with Grafana:
+  #
+  # 'GF_AUTH_PROXY_ENABLED=true'
+  # 'GF_AUTH_PROXY_HEADER_NAME='X-Forwarded-User'
+  # 'GF_SERVER_ROOT_URL='https://grafana.example.com'
+  grafana:
+    container_name: grafana
+    image: 'index.docker.io/khulnasoft/grafana:5.11.3601@sha256:df2024058530cbd33cbc69e92438e0c42db82a7237296f8cdbfb1a3eefe957c6'
+    cpus: 1
+    mem_limit: '1g'
+    volumes:
+      - 'grafana:/var/lib/grafana'
+      - '../grafana/datasources:/sg_config_grafana/provisioning/datasources'
+      - '../grafana/dashboards:/sg_grafana_additional_dashboards'
+    ports:
+      - '0.0.0.0:3370:3370'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Publishes Prometheus metrics about Docker containers.
+  #
+  # Disk: none
+  # Ports exposed to other Khulnasoft services: 48080/TCP
+  # Ports exposed to the public internet: none
+  #
+  cadvisor:
+    container_name: cadvisor
+    image: 'index.docker.io/khulnasoft/cadvisor:5.11.3601@sha256:2c74f9842b68893e992d7ad44b316a417bf12257f7eef0312534d421036203c4'
+    cpus: 1
+    mem_limit: '1g'
+    # You may set `privileged` to `false and `cadvisor` will run with reduced privileges.
+    # `cadvisor` requires root privileges in order to display provisioning metrics.
+    # These metrics provide critical information to help you scale the Khulnasoft deployment.
+    # If you would like to bring your own infrastructure monitoring & alerting solution,
+    # you may want to remove the `cadvisor` container completely
+    privileged: true
+    volumes:
+      - '/:/rootfs:ro'
+      - '/var/run:/var/run:ro'
+      - '/sys:/sys:ro'
+      - '/var/lib/docker/:/var/lib/docker:ro'
+      - '/dev/disk/:/dev/disk:ro'
+      # Uncomment to enable container monitoring on MacOS
+      # - '/var/run/docker.sock:/var/run/docker.sock:ro'
+    devices:
+      - '/dev/kmsg'
+    networks:
+      - khulnasoft
+    restart: always
+    expose:
+      - 48080
+
+  # Description: Publishes Prometheus metrics about the machine's hardware / operating system.
+  #
+  # Disk: none
+  # Ports exposed to other Khulnasoft services: 9100/TCP
+  # Ports exposed to the public internet: none
+  #
+  node-exporter:
+    container_name: node-exporter
+    image: 'index.docker.io/khulnasoft/node-exporter:5.11.3601@sha256:3c10b8e27107a4cd4eb2cbdd638a159a5e9ff95bee01c01dcc2ece9455ce390a'
+    cpus: .5
+    mem_limit: '1g'
+    pid: 'host'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--no-collector.wifi'
+      - '--no-collector.hwmon'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    expose:
+      - 9100
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: PostgreSQL database for various data.
+  #
+  # Disk: 128GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: 5432/TCP 9187/TCP
+  # Ports exposed to the public internet: none
+  #
+  pgsql:
+    container_name: pgsql
+    image: 'index.docker.io/khulnasoft/postgresql-16:5.11.3601@sha256:fc9097989290ac83d2c2b188a2648a68c3858aefd1a636369a48107ee4b8bfd2'
+    cpus: 4
+    mem_limit: '4g'
+    shm_size: '1g'
+    healthcheck:
+      test: '/liveness.sh'
+      interval: 10s
+      timeout: 1s
+      retries: 10
+      start_period: 1h
+    volumes:
+      - 'pgsql:/data/'
+      - '../pgsql/conf:/conf/'
+    networks:
+      - khulnasoft
+    restart: always
+    stop_grace_period: 120s
+
+  # Description: This container will collect and expose prometheus metrics about `pgsql` PostgreSQL server.
+  #
+  # Disk: None
+  # Ports exposed to other Khulnasoft services: 9187/TCP
+  # Ports exposed to the public internet: none
+  #
+  # If you're using a DB instance hosted outside of docker-compose, the environment variables
+  # for this container will need to be updated to reflect the new connection information.
+  pgsql-exporter:
+    container_name: pgsql-exporter
+    image: 'index.docker.io/khulnasoft/postgres_exporter:5.11.3601@sha256:c2a21d6c51adaecfbc6a4a994bbe15acf3187b764a051e6bb9941e0e064aa708'
+    cpus: 0.1
+    mem_limit: '50m'
+    networks:
+      - khulnasoft
+    restart: always
+    environment:
+      - 'DATA_SOURCE_NAME=postgres://sg:@pgsql:5432/?sslmode=disable'
+      - 'PG_EXPORTER_EXTEND_QUERY_PATH=/config/queries.yaml'
+
+  # Description: PostgreSQL database for code intelligence data.
+  #
+  # Disk: 128GB / persistent SSD
+  # Network: 1Gbps
+  # Ports exposed to other Khulnasoft services: 5432/TCP 9187/TCP
+  # Ports exposed to the public internet: none
+  #
+  codeintel-db:
+    container_name: codeintel-db
+    image: 'index.docker.io/khulnasoft/postgresql-16:5.11.3601@sha256:fc9097989290ac83d2c2b188a2648a68c3858aefd1a636369a48107ee4b8bfd2'
+    cpus: 4
+    mem_limit: '4g'
+    shm_size: '1g'
+    healthcheck:
+      test: '/liveness.sh'
+      interval: 10s
+      timeout: 1s
+      retries: 10
+      start_period: 1h
+    volumes:
+      - 'codeintel-db:/data/'
+      - '../codeintel-db/conf:/conf/'
+    networks:
+      - khulnasoft
+    restart: always
+    stop_grace_period: 120s
+
+  # Description: This container will collect and expose prometheus metrics about `codeintel-db` PostgreSQL server.
+  #
+  # Disk: None
+  # Ports exposed to other Khulnasoft services: 9187/TCP
+  # Ports exposed to the public internet: none
+  #
+  # If you're using a DB instance hosted outside of docker-compose, the environment variables
+  # for this container will need to be updated to reflect the new connection information.
+  codeintel-db-exporter:
+    container_name: codeintel-db-exporter
+    image: 'index.docker.io/khulnasoft/postgres_exporter:5.11.3601@sha256:c2a21d6c51adaecfbc6a4a994bbe15acf3187b764a051e6bb9941e0e064aa708'
+    cpus: 0.1
+    mem_limit: '50m'
+    networks:
+      - khulnasoft
+    restart: always
+    environment:
+      - 'DATA_SOURCE_NAME=postgres://sg:@codeintel-db:5432/?sslmode=disable'
+      - 'PG_EXPORTER_EXTEND_QUERY_PATH=/config/code_intel_queries.yaml'
+
+  # Description: PostgreSQL database for code insights data.
+  #
+  # Disk: 128GB / persistent SSD
+  # Network: 1Gbps
+  # Ports exposed to other Khulnasoft services: 5432/TCP 9187/TCP
+  # Ports exposed to the public internet: none
+  #
+  codeinsights-db:
+    container_name: codeinsights-db
+    image: 'index.docker.io/khulnasoft/postgresql-16-codeinsights:5.11.3601@sha256:40f19182ac1246d3c99f59fcb113c6a5046156f070fa1b1302db0e71cecf216b'
+    cpus: 4
+    mem_limit: '2g'
+    shm_size: '1g'
+    environment:
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=postgres
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: '/liveness.sh'
+      interval: 10s
+      timeout: 1s
+      retries: 10
+      start_period: 1h
+    volumes:
+      - 'codeinsights-db:/var/lib/postgresql/data/'
+      - '../codeinsights-db/conf:/conf/'
+    networks:
+      - khulnasoft
+    restart: always
+    stop_grace_period: 120s
+
+  # Description: This container will collect and expose prometheus metrics about `codeinsights-db` PostgreSQL server.
+  #
+  # Disk: None
+  # Ports exposed to other Khulnasoft services: 9187/TCP
+  # Ports exposed to the public internet: none
+  #
+  # If you're using a DB instance hosted outside of docker-compose, the environment variables
+  # for this container will need to be updated to reflect the new connection information.
+  codeinsights-db-exporter:
+    container_name: codeinsights-db-exporter
+    image: 'index.docker.io/khulnasoft/postgres_exporter:5.11.3601@sha256:c2a21d6c51adaecfbc6a4a994bbe15acf3187b764a051e6bb9941e0e064aa708'
+    cpus: 0.1
+    mem_limit: '50m'
+    networks:
+      - khulnasoft
+    restart: always
+    environment:
+      - 'DATA_SOURCE_NAME=postgres://postgres:password@codeinsights-db:5432/?sslmode=disable'
+      - 'PG_EXPORTER_EXTEND_QUERY_PATH=/config/code_insights_queries.yaml'
+
+  # Description: generic S3-like blobstore for storing LSIF uploads.
+  #
+  # Disk: 128GB / persistent SSD
+  # Network: 1Gbps
+  # Ports exposed to other Khulnasoft services: 9000/TCP
+  # Ports exposed to public internet: none
+  #
+  blobstore:
+    container_name: blobstore
+    image: 'index.docker.io/khulnasoft/blobstore:5.11.3601@sha256:1d66b75544b75ee56f64d97c08acf47e6d6838c2de20678975461a399d875578'
+    cpus: 1
+    mem_limit: '1g'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:9000/']
+      interval: 10s
+      timeout: 1s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - 'blobstore:/data'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Redis for storing short-lived caches.
+  #
+  # Disk: 128GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: 6379/TCP 9121/TCP
+  # Ports exposed to the public internet: none
+  #
+  redis-cache:
+    container_name: redis-cache
+    image: 'index.docker.io/khulnasoft/redis-cache:5.11.3601@sha256:f7b29bd64490761aea08cc072e17a58d6c5746efb3925b6aa6d6bbb27e5c8102'
+    cpus: 1
+    mem_limit: '7g'
+    volumes:
+      - 'redis-cache:/redis-data'
+    networks:
+      - khulnasoft
+    restart: always
+  # Description: Redis for storing semi-persistent data like user sessions.
+  #
+  # Disk: 128GB / persistent SSD
+  # Ports exposed to other Khulnasoft services: 6379/TCP 9121/TCP
+  # Ports exposed to the public internet: none
+  #
+  redis-store:
+    container_name: redis-store
+    image: 'index.docker.io/khulnasoft/redis-store:5.11.3601@sha256:12ea9958e6749cdd8becac44c491429514fcc295823906d13920caca45c1fff8'
+    cpus: 1
+    mem_limit: '7g'
+    volumes:
+      - 'redis-store:/redis-data'
+    networks:
+      - khulnasoft
+    restart: always
+
+  # Description: Ingests and exports OpenTelemetry data.
+  #
+  # Ports exposed to other Khulnasoft services: 4317 (receiver), 55679 (zpages)
+  # Ports exposed to the public internet: none
+  otel-collector:
+    container_name: otel-collector
+    image: 'index.docker.io/khulnasoft/opentelemetry-collector:5.11.3601@sha256:dc1406eacedc93bff2d2fefbe330bc1b9d6278804f7cf29ea79a395dafb5d1ae'
+    cpus: 1
+    mem_limit: '1g'
+    networks:
+      - khulnasoft
+    restart: always
+    # Default configurations are shipped in '/etc/otel-collector/configs/'
+    command: ['--config', '/etc/otel-collector/configs/logging.yaml']
+    volumes:
+      - '../otel-collector/config.yaml:/etc/otel-collector/config.yaml'
+
+volumes:
+  caddy:
+  gitserver-0:
+  grafana:
+  pgsql:
+  codeintel-db:
+  codeinsights-db:
+  blobstore:
+  prometheus-v2:
+  redis-cache:
+  redis-store:
+  repo-updater:
+  worker:
+  searcher-0:
+  khulnasoft-frontend-0:
+  khulnasoft-frontend-internal-0:
+  symbols-0:
+  zoekt-0-shared:
+networks:
+  khulnasoft:
